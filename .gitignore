@@ -1,0 +1,5 @@
+# LeadGen Pro
+
+__pycache__/
+*.pyc
+*.db

@@ -5,12 +5,172 @@ from bs4 import BeautifulSoup
 import re
 from urllib.parse import urlparse
 import time
+import smtplib
+import os
+import json
+import sqlite3
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime, timedelta
+
+# --- DATABASE AND CONFIG PATHS ---
+DB_PATH = os.path.join(os.path.dirname(__file__), 'leadgen.db')
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
+
+
+def init_database():
+    """Initialize SQLite database with required tables."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Scheduled emails table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scheduled_emails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipient TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            company_name TEXT,
+            website TEXT,
+            niche TEXT,
+            scheduled_time TEXT NOT NULL,
+            status TEXT DEFAULT 'Pending',
+            created_at TEXT
+        )
+    ''')
+    
+    # Email log table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS email_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            company_name TEXT,
+            website TEXT,
+            contact_email TEXT,
+            niche TEXT,
+            subject TEXT,
+            body TEXT,
+            status TEXT,
+            notes TEXT
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+
+def load_config():
+    """Load Gmail credentials from config.json file."""
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except:
+        return {"gmail_address": "", "gmail_app_password": "", "sender_name": ""}
+
+
+def save_config(config):
+    """Save Gmail credentials to config.json file."""
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=4)
+
+
+# Initialize database on app start
+init_database()
+
+# --- SESSION STATE ---
+if 'email_log' not in st.session_state:
+    st.session_state.email_log = []
+
+if 'approval_state' not in st.session_state:
+    st.session_state.approval_state = {}
+
+
+# --- GMAIL SENDING FUNCTION ---
+def send_email_gmail(recipient_email, subject, body):
+    """Send email via Gmail SMTP using config.json credentials."""
+    config = load_config()
+    gmail_address = config.get('gmail_address') or os.environ.get('GMAIL_ADDRESS')
+    gmail_password = config.get('gmail_app_password') or os.environ.get('GMAIL_APP_PASSWORD')
+    
+    if not gmail_address or not gmail_password:
+        return False, "Gmail credentials not configured. Set them in Settings (sidebar) or in config.json"
+    
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = gmail_address
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(gmail_address, gmail_password)
+            server.send_message(msg)
+        
+        return True, "Email sent successfully!"
+    except smtplib.SMTPAuthenticationError:
+        return False, "Gmail authentication failed. Check your App Password."
+    except Exception as e:
+        return False, f"Failed to send: {str(e)}"
+
+
+def log_email(company_name, website, contact_email, niche, subject, body, sent_status, notes=""):
+    """Add entry to email tracking log in database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO email_log (timestamp, company_name, website, contact_email, niche, subject, body, status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        company_name, website, contact_email, niche, subject, 
+        body.replace('\n', ' '), sent_status, notes
+    ))
+    conn.commit()
+    conn.close()
+
+
+def schedule_email_db(recipient_email, subject, body, scheduled_datetime, company_name, website, niche):
+    """Schedule an email in the database for the background scheduler to process."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO scheduled_emails (recipient, subject, body, company_name, website, niche, scheduled_time, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', ?)
+    ''', (
+        recipient_email, subject, body, company_name, website, niche,
+        scheduled_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+    conn.commit()
+    conn.close()
+    return scheduled_datetime
+
+
+def get_scheduled_emails():
+    """Get all scheduled emails from database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, recipient, subject, scheduled_time, status FROM scheduled_emails ORDER BY scheduled_time DESC LIMIT 50')
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_email_log():
+    """Get email log from database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT timestamp, company_name, website, contact_email, niche, subject, status, notes FROM email_log ORDER BY timestamp DESC LIMIT 100')
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="LeadGen Pro",
     layout="wide",
-    page_icon="◆"
+    page_icon="◆",
+    initial_sidebar_state="expanded"
 )
 
 st.markdown("""
@@ -28,6 +188,36 @@ st.markdown("""
         background: linear-gradient(180deg, #0D0D12 0%, #13131A 100%);
     }
     
+    /* SIDEBAR TOGGLE - Fixed visible button */
+    [data-testid="collapsedControl"] {
+        display: block !important;
+        visibility: visible !important;
+        position: fixed !important;
+        top: 14px !important;
+        left: 14px !important;
+        z-index: 999999 !important;
+        background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%) !important;
+        border-radius: 10px !important;
+        padding: 8px !important;
+        box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4) !important;
+    }
+    
+    [data-testid="collapsedControl"] svg {
+        color: white !important;
+        width: 20px !important;
+        height: 20px !important;
+    }
+    
+    [data-testid="collapsedControl"]:hover {
+        transform: scale(1.05) !important;
+        box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6) !important;
+    }
+    
+    /* Hide default header buttons that might overlap */
+    button[kind="header"] {
+        visibility: visible !important;
+    }
+    
     /* Premium Sidebar */
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #111118 0%, #0D0D12 100%);
@@ -37,6 +227,7 @@ st.markdown("""
     section[data-testid="stSidebar"] > div {
         background: transparent;
     }
+
     
     /* Premium Cards */
     .card {
@@ -590,6 +781,32 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # --- GMAIL SETTINGS ---
+    with st.expander("⚙️ Gmail Settings", expanded=False):
+        config = load_config()
+        
+        st.markdown("*Credentials saved to config.json - works on any device*")
+        
+        gmail_email = st.text_input("Gmail Address", value=config.get('gmail_address', ''), key="settings_email")
+        gmail_pass = st.text_input("App Password", value=config.get('gmail_app_password', ''), type="password", key="settings_pass")
+        sender_name = st.text_input("Sender Name (optional)", value=config.get('sender_name', ''), key="settings_name")
+        
+        if st.button("💾 Save Settings", use_container_width=True):
+            save_config({
+                "gmail_address": gmail_email,
+                "gmail_app_password": gmail_pass,
+                "sender_name": sender_name
+            })
+            st.success("✅ Settings saved!")
+        
+        st.markdown("""
+        <div style='font-size: 11px; color: #9CA3AF; margin-top: 10px;'>
+            <a href='https://myaccount.google.com/apppasswords' target='_blank' style='color: #6366F1;'>Get App Password →</a>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
     st.markdown("""
     <div style='padding: 16px; background: rgba(99, 102, 241, 0.08); border-radius: 14px; border: 1px solid rgba(99, 102, 241, 0.15); margin-bottom: 20px;'>
         <p style='font-size: 13px; font-weight: 600; color: #E8ECF4; margin-bottom: 14px; font-family: DM Sans, sans-serif;'>How It Works</p>
@@ -700,7 +917,7 @@ with col4:
 st.markdown("---")
 generate_btn = st.button("⚡ Analyze & Generate Email", type="primary", use_container_width=True)
 
-# Process
+# Process and store in session state
 if generate_btn:
     if not company_name:
         st.error("Please enter a company name.")
@@ -716,46 +933,149 @@ if generate_btn:
             # Step 4: Generate email
             subject, email_body = generate_email(company_name, niche, issues)
         
-        # Display results
-        st.markdown("---")
-        
-        # Issues Found
-        st.markdown("### 🔍 Issues Identified")
-        if issues:
-            for i, issue in enumerate(issues, 1):
-                st.markdown(f'<div class="issue-item">#{i}: {issue}</div>', unsafe_allow_html=True)
+        # Store results in session state for persistence
+        st.session_state['generated_result'] = {
+            'company_name': company_name,
+            'website_url': website_url,
+            'niche': niche,
+            'issues': issues,
+            'subject': subject,
+            'email_body': email_body
+        }
+
+# Display results if they exist in session state
+if 'generated_result' in st.session_state and st.session_state['generated_result']:
+    result = st.session_state['generated_result']
+    
+    st.markdown("---")
+    
+    # Issues Found
+    st.markdown("### 🔍 Issues Identified")
+    if result['issues']:
+        for i, issue in enumerate(result['issues'], 1):
+            st.markdown(f'<div class="issue-item">#{i}: {issue}</div>', unsafe_allow_html=True)
+    else:
+        st.info("No major conversion issues detected from the provided text.")
+    
+    st.markdown("---")
+    
+    # Email Output
+    st.markdown("### 📧 Generated Email")
+    
+    # Editable subject line with default
+    edited_subject = st.text_input("Subject Line", value=result['subject'], key="single_subject")
+    
+    # v1.1: Editable email body
+    edited_body = st.text_area("Email Body", value=result['email_body'], height=250, key="single_body")
+    
+    st.markdown("---")
+    
+    # v1.1: Recipient email and approval
+    st.markdown("### 📤 Send Email")
+    col_email, col_approve = st.columns([2, 1])
+    
+    with col_email:
+        recipient_email = st.text_input("Recipient Email", placeholder="contact@company.com", key="single_recipient")
+    
+    with col_approve:
+        st.markdown("<br>", unsafe_allow_html=True)
+        approved = st.checkbox("✅ Approve this email for sending", key="single_approve")
+    
+    # Action buttons
+    col_dl, col_send, col_log, col_clear = st.columns([1, 1, 1, 1])
+    
+    with col_dl:
+        st.download_button(
+            "📥 Download Email",
+            f"Subject: {edited_subject}\n\n{edited_body}",
+            file_name=f"{result['company_name'].replace(' ', '_')}_email.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    
+    with col_send:
+        send_clicked = st.button("📧 Send via Gmail", use_container_width=True, disabled=not approved)
+        if send_clicked:
+            if not approved:
+                st.error("⚠️ Please approve the email before sending.")
+            elif not recipient_email:
+                st.error("⚠️ Please enter recipient email address.")
+            else:
+                success, message = send_email_gmail(recipient_email, edited_subject, edited_body)
+                if success:
+                    st.success(f"✅ {message}")
+                    log_email(result['company_name'], result['website_url'], recipient_email, result['niche'], edited_subject, edited_body, "Yes")
+                else:
+                    st.error(f"❌ {message}")
+                    log_email(result['company_name'], result['website_url'], recipient_email, result['niche'], edited_subject, edited_body, "Failed", message)
+    
+    with col_log:
+        if st.button("📋 Save to Log Only", use_container_width=True):
+            log_email(result['company_name'], result['website_url'], recipient_email or "N/A", result['niche'], edited_subject, edited_body, "No - Logged Only")
+            st.success("✅ Email saved to tracking log!")
+    
+    with col_clear:
+        if st.button("🗑️ Clear Result", use_container_width=True):
+            st.session_state['generated_result'] = None
+            st.rerun()
+    
+    # --- SCHEDULING SECTION ---
+    st.markdown("---")
+    st.markdown("### ⏰ Schedule Email")
+    st.markdown("*Schedule for any date/time. Run `scheduler.py` separately to send scheduled emails.*")
+    
+    col_date, col_time = st.columns(2)
+    
+    with col_date:
+        schedule_date = st.date_input("Date", value=datetime.now().date() + timedelta(days=1), key="schedule_date")
+    
+    with col_time:
+        schedule_time = st.time_input("Time", value=datetime.now().replace(hour=9, minute=0).time(), key="schedule_time")
+    
+    schedule_clicked = st.button("📅 Schedule Email", use_container_width=True, disabled=not approved)
+    if schedule_clicked:
+        if not approved:
+            st.error("⚠️ Please approve the email before scheduling.")
+        elif not recipient_email:
+            st.error("⚠️ Please enter recipient email address.")
         else:
-            st.info("No major conversion issues detected from the provided text.")
-        
-        st.markdown("---")
-        
-        # Email Output
-        st.markdown("### 📧 Generated Email")
-        
-        # Editable subject line with default
-        default_subject = "Quick question about your website"
-        edited_subject = st.text_input("Subject Line", value=default_subject)
-        
-        st.markdown(f'<div class="email-output">{email_body}</div>', unsafe_allow_html=True)
-        
-        # Copy buttons
-        st.markdown("---")
-        col_copy1, col_copy2, col_copy3 = st.columns([1, 1, 2])
-        with col_copy1:
-            st.code(edited_subject, language=None)
-        with col_copy2:
-            st.download_button(
-                "📥 Download Email",
-                f"Subject: {edited_subject}\n\n{email_body}",
-                file_name=f"{company_name.replace(' ', '_')}_email.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+            scheduled_datetime = datetime.combine(schedule_date, schedule_time)
+            if scheduled_datetime <= datetime.now():
+                st.error("⚠️ Please select a future date/time.")
+            else:
+                schedule_email_db(
+                    recipient_email, edited_subject, edited_body, scheduled_datetime,
+                    result['company_name'], result['website_url'], result['niche']
+                )
+                st.success(f"✅ Email scheduled for {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}")
+
+# --- SCHEDULED EMAILS QUEUE (from database) ---
+st.markdown("---")
+st.markdown("### 📅 Scheduled Emails Queue")
+
+scheduled_rows = get_scheduled_emails()
+if scheduled_rows:
+    scheduled_df = pd.DataFrame(scheduled_rows, columns=['ID', 'Recipient', 'Subject', 'Scheduled Time', 'Status'])
+    st.dataframe(scheduled_df, use_container_width=True)
+    
+    st.markdown("""
+    <div style='background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.2); border-radius: 8px; padding: 12px; margin: 10px 0;'>
+        <p style='color: #9CA3AF; font-size: 12px; margin: 0;'>
+            <strong>⚠️ Run the scheduler:</strong> Open a terminal and run <code>python scheduler.py</code> to process scheduled emails.
+            The scheduler can run on any device with access to the database file.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if st.button("🔄 Refresh Queue", use_container_width=True):
+        st.rerun()
+else:
+    st.info("No scheduled emails. Schedule an email above to see it here.")
 
 # Batch Processing Section
 st.markdown("---")
 st.markdown("### 📊 Batch Processing (CSV)")
-st.markdown("Upload a CSV with columns: `Company Name`, `Website URL`, `Niche`")
+st.markdown("Upload a CSV with columns: `Company Name`, `Website URL`, `Niche`, `Contact Email` (optional)")
 
 uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
 
@@ -770,19 +1090,32 @@ if uploaded_file:
         
         for i, row in df.iterrows():
             progress.progress((i + 1) / len(df))
-            status.write(f"Processing {i+1}/{len(df)}: {row.get('Company Name', 'Unknown')}...")
             
-            comp_name = row.get('Company Name', '')
-            web_url = row.get('Website URL', '')
-            comp_niche = row.get('Niche', '')
+            comp_name = str(row.get('Company Name', '')).strip()
+            web_url = str(row.get('Website URL', '')).strip()
+            comp_niche = str(row.get('Niche', '')).strip()
+            contact_email = str(row.get('Contact Email', '')).strip() if 'Contact Email' in df.columns else ''
             
-            # Scrape if URL provided
+            status.write(f"Processing {i+1}/{len(df)}: {comp_name}...")
+            
+            # v1.1: URL normalization
+            if web_url and not web_url.startswith(('http://', 'https://')):
+                web_url = 'https://' + web_url
+            
+            # v1.1: Scrape with explicit error handling
             hp_text, srv_text = "", ""
+            scrape_status = "No URL"
+            
             if web_url:
                 try:
                     hp_text, srv_text = scrape_website_text(web_url)
-                except:
-                    pass
+                    if hp_text and not hp_text.startswith("Error"):
+                        scrape_status = "Success"
+                    else:
+                        scrape_status = f"Failed: {hp_text[:50]}" if hp_text else "Empty response"
+                except Exception as e:
+                    scrape_status = f"Error: {str(e)[:50]}"
+                    hp_text, srv_text = "", ""
             
             # Analyze
             issues = analyze_website(comp_name, web_url, comp_niche, hp_text, srv_text)
@@ -791,8 +1124,10 @@ if uploaded_file:
             results.append({
                 'Company Name': comp_name,
                 'Website': web_url,
+                'Contact Email': contact_email,
                 'Niche': comp_niche,
-                'Issues Found': ' | '.join(issues),
+                'Scrape Status': scrape_status,
+                'Issues Found': ' | '.join(issues) if issues else 'None detected',
                 'Subject Line': subject,
                 'Email Body': email_body.replace('\n', ' ')
             })
@@ -801,6 +1136,9 @@ if uploaded_file:
         
         progress.empty()
         status.success(f"✅ Processed {len(results)} leads!")
+        
+        # Store results in session state for batch approval
+        st.session_state['batch_results'] = results
         
         results_df = pd.DataFrame(results)
         st.dataframe(results_df)
@@ -813,3 +1151,23 @@ if uploaded_file:
             "text/csv",
             use_container_width=True
         )
+
+# --- EMAIL TRACKING LOG (from database) ---
+st.markdown("---")
+st.markdown("### 📋 Email Tracking Log")
+
+log_rows = get_email_log()
+if log_rows:
+    log_df = pd.DataFrame(log_rows, columns=['Timestamp', 'Company', 'Website', 'Email', 'Niche', 'Subject', 'Status', 'Notes'])
+    st.dataframe(log_df, use_container_width=True)
+    
+    csv_log = log_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "📥 Export Log to CSV",
+        csv_log,
+        f"email_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        "text/csv",
+        use_container_width=True
+    )
+else:
+    st.info("No emails logged yet. Send or save emails to see them here.")
