@@ -165,6 +165,63 @@ def get_email_log():
     conn.close()
     return rows
 
+
+# --- INTEGRATED BACKGROUND SCHEDULER ---
+import threading
+
+def process_pending_emails():
+    """Check for due emails and send them."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        SELECT id, recipient, subject, body, company_name, website, niche 
+        FROM scheduled_emails 
+        WHERE scheduled_time <= ? AND status = 'Pending'
+    ''', (now,))
+    
+    due_emails = cursor.fetchall()
+    
+    for email in due_emails:
+        email_id, recipient, subject, body, company_name, website, niche = email
+        success, message = send_email_gmail(recipient, subject, body)
+        
+        new_status = 'Sent' if success else f'Failed: {message}'
+        cursor.execute('UPDATE scheduled_emails SET status = ? WHERE id = ?', (new_status, email_id))
+        
+        # Log the email
+        cursor.execute('''
+            INSERT INTO email_log (timestamp, company_name, website, contact_email, niche, subject, body, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            company_name, website, recipient, niche, subject, body,
+            'Yes (Scheduled)' if success else 'Failed (Scheduled)',
+            message if not success else ''
+        ))
+    
+    conn.commit()
+    conn.close()
+    return len(due_emails)
+
+
+def run_scheduler_loop():
+    """Background loop that checks for emails every 60 seconds."""
+    while True:
+        try:
+            process_pending_emails()
+        except:
+            pass
+        time.sleep(60)
+
+
+# Start scheduler in background thread (only once)
+if 'scheduler_started' not in st.session_state:
+    st.session_state.scheduler_started = True
+    scheduler_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
+    scheduler_thread.start()
+
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="LeadGen Pro",
@@ -844,14 +901,48 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-# Main Area
-st.markdown("""
-<div style='padding: 30px 0 40px 0;'>
-    <p style='font-size: 12px; color: #6366F1; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; font-family: DM Sans, sans-serif;'>Website Analysis</p>
-    <h1 style='font-size: 36px; font-weight: 700; color: #FFFFFF; margin-bottom: 12px; font-family: DM Sans, sans-serif; line-height: 1.2;'>Audit websites. Generate outreach.</h1>
-    <p style='color: #9CA3AF; font-size: 15px; font-family: DM Sans, sans-serif;'>Enter business details to identify conversion issues and create personalized cold emails.</p>
-</div>
-""", unsafe_allow_html=True)
+# Main Area - with settings access button
+col_header, col_settings = st.columns([5, 1])
+
+with col_header:
+    st.markdown("""
+    <div style='padding: 30px 0 40px 0;'>
+        <p style='font-size: 12px; color: #6366F1; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; font-family: DM Sans, sans-serif;'>Website Analysis</p>
+        <h1 style='font-size: 36px; font-weight: 700; color: #FFFFFF; margin-bottom: 12px; font-family: DM Sans, sans-serif; line-height: 1.2;'>Audit websites. Generate outreach.</h1>
+        <p style='color: #9CA3AF; font-size: 15px; font-family: DM Sans, sans-serif;'>Enter business details to identify conversion issues and create personalized cold emails.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_settings:
+    st.markdown("<div style='padding-top: 30px;'>", unsafe_allow_html=True)
+    with st.popover("⚙️ Settings"):
+        st.markdown("### Gmail Settings")
+        config = load_config()
+        gmail_email = st.text_input("Gmail Address", value=config.get('gmail_address', ''), key="popup_email")
+        gmail_pass = st.text_input("App Password", value=config.get('gmail_app_password', ''), type="password", key="popup_pass")
+        if st.button("💾 Save", key="popup_save"):
+            save_config({
+                "gmail_address": gmail_email,
+                "gmail_app_password": gmail_pass,
+                "sender_name": config.get('sender_name', '')
+            })
+            st.success("Saved!")
+        st.markdown("[Get App Password →](https://myaccount.google.com/apppasswords)")
+    
+    # Scheduler status indicator
+    st.markdown("""
+    <div style='display: flex; align-items: center; gap: 6px; margin-top: 10px;'>
+        <div style='width: 8px; height: 8px; background: #22C55E; border-radius: 50%; animation: pulse 2s infinite;'></div>
+        <span style='font-size: 11px; color: #9CA3AF;'>Scheduler Active</span>
+    </div>
+    <style>
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # Input Section
 st.markdown("### Business Information")
