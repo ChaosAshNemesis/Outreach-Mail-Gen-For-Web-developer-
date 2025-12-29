@@ -1113,7 +1113,7 @@ if 'generated_result' in st.session_state and st.session_state['generated_result
     # --- SCHEDULING SECTION ---
     st.markdown("---")
     st.markdown("### ⏰ Schedule Email")
-    st.markdown("*Schedule for any date/time. Run `scheduler.py` separately to send scheduled emails.*")
+    st.markdown("*Schedule for any date/time. Emails are processed automatically or click 'Process Now' below.*")
     
     col_date, col_time = st.columns(2)
     
@@ -1149,17 +1149,18 @@ if scheduled_rows:
     scheduled_df = pd.DataFrame(scheduled_rows, columns=['ID', 'Recipient', 'Subject', 'Scheduled Time', 'Status'])
     st.dataframe(scheduled_df, use_container_width=True)
     
-    st.markdown("""
-    <div style='background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.2); border-radius: 8px; padding: 12px; margin: 10px 0;'>
-        <p style='color: #9CA3AF; font-size: 12px; margin: 0;'>
-            <strong>⚠️ Run the scheduler:</strong> Open a terminal and run <code>python scheduler.py</code> to process scheduled emails.
-            The scheduler can run on any device with access to the database file.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if st.button("🔄 Refresh Queue", use_container_width=True):
-        st.rerun()
+    col_process, col_refresh = st.columns(2)
+    with col_process:
+        if st.button("⚡ Process Scheduled Emails Now", use_container_width=True, type="primary"):
+            count = process_pending_emails()
+            if count > 0:
+                st.success(f"✅ Sent {count} email(s)!")
+            else:
+                st.info("No emails due yet. Check scheduled times.")
+            st.rerun()
+    with col_refresh:
+        if st.button("🔄 Refresh Queue", use_container_width=True):
+            st.rerun()
 else:
     st.info("No scheduled emails. Schedule an email above to see it here.")
 
